@@ -1,0 +1,114 @@
+---
+title: "PCA"
+output: pdf_document
+date: '2024-02-23'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Documents/Data")
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+
+```
+
+```{r}
+# get SNPs in common for the 4 arrays to be used in PCA
+
+H610 <- read.table("/Users/wendi qu/Documents/Data/H610_merged.bim", header = FALSE, stringsAsFactors = FALSE)
+H660 <- read.table("/Users/wendi qu/Documents/Data/H660_merged.bim", header = FALSE, stringsAsFactors = FALSE)
+Omni5 <- read.table("/Users/wendi qu/Documents/Data/Omni5_merged.bim", header = FALSE, stringsAsFactors = FALSE)
+Omni25 <- read.table("/Users/wendi qu/Documents/Data/Omni25_merged.bim", header = FALSE, stringsAsFactors = FALSE)
+SNP_exclude <- read.table("/Users/wendi qu/Documents/Data/hg19 failed.txt", header = FALSE, stringsAsFactors = FALSE)
+
+
+# number of SNPs in each array
+length(unique(H610$V2)) # 570493
+length(unique(H660$V2)) # 545946
+length(unique(Omni5$V2)) # 2651524
+length(unique(Omni25$V2)) # 1874724
+
+# merge to find common SNPs
+merged_SNP <- H610 %>%
+  inner_join(H660, by = "V2") %>%
+  inner_join(Omni5, by = "V2") %>%
+  inner_join(Omni25, by = "V2") 
+
+length(unique(merged_SNP$V2)) # 343995
+
+# output SNPs that are in common into txt 
+write.table(merged_SNP[, c("V1.x", "V2", "V3.x", "V4.x", "V5.x", "V6.x")], file = "/Users/wendi qu/Documents/Data/SNP_common.txt", row.names = F, 
+            col.names = F,quote = FALSE)
+
+array_seq <- read.table("/Users/wendi qu/Documents/Data/Merged-TOPMed-7arrays-10XG-PacBioHIFI-N5467-n7217886-postQC.bim", header = FALSE, stringsAsFactors = FALSE)
+array_seq$V1 <- as.numeric(array_seq$V1)
+array_seq$V1 <- ifelse(is.na(array_seq$V1), 23, array_seq$V1)
+
+merged_SNP2 <- array_seq %>%
+  inner_join(merged_SNP, join_by(V1==V1.x, V4==V4.x)) # 51163
+
+# output rsid into txt 
+write.table(merged_SNP2[, c("V1", "V2.x", "V3", "V4", "V5", "V6")], file = "/Users/wendi qu/Documents/Data/SNP_keep.txt", row.names = F, 
+            col.names = F,quote = FALSE)
+read.table("/Users/wendi qu/Documents/Data/SNP_keep.txt", header = FALSE, stringsAsFactors = FALSE)
+# check with only Omni25
+# merge to find common SNPs
+merged_SNP3 <- array_seq %>%
+  inner_join(Omni5, join_by(V1==V1, V4==V4)) # 70019
+
+
+```
+
+
+Read in and plot PCA results:
+
+```{r, echo=F}
+varprop <- read.table("~/Documents/Data/PCAIR_CAN_varprop", header = FALSE)[,2]
+eigenvalues <- read.table("~/Documents/Data/PCAIR_CAN_Eigenvalues", header = FALSE)[,2]
+eigenvectors <- read.table("~/Documents/Data/PCAIR_CAN_Eigenvectors", header = FALSE)
+
+# Sensitivity analysis
+varprop <- read.table("~/Documents/Data/Sensitivity/PCAIR_CAN_varprop_nomiss", header = FALSE)[,2]
+eigenvalues <- read.table("~/Documents/Data/Sensitivity/PCAIR_CAN_Eigenvalues_nomiss", header = FALSE)[,2]
+eigenvectors <- read.table("~/Documents/Data/Sensitivity/PCAIR_CAN_Eigenvectors_nomiss", header = FALSE)
+
+# Scree plot
+## proportion
+qplot(c(1:10), varprop[1:10]*100) + 
+  geom_line() + 
+  xlab("Principal Component") + 
+  ylab("Variance Explained (%)") +
+  ggtitle("Scree Plot") +
+  ylim(0, 2) +
+  scale_x_continuous(breaks = seq(1, 10, by = 1))
+
+## eigenvalue
+qplot(c(1:10), eigenvalues[1:10]) + 
+  geom_line() + 
+  xlab("Principal Component") + 
+  ylab("Eigenvalue") +
+  ggtitle("Scree Plot") +
+  ylim(2, 11) +
+  scale_x_continuous(breaks = seq(1, 10, by = 1))
+
+# PC against each other
+## PC1 vs. PC2
+plot(eigenvectors[, 2], eigenvectors[, 3], 
+main = "PC1 vs PC2", xlab = "Principal Component 1", 
+ylab = "Principal Component 2")
+
+## PC1 vs. PC3
+plot(eigenvectors[, 2], eigenvectors[, 4], 
+main = "PC1 vs PC3", xlab = "Principal Component 1", 
+ylab = "Principal Component 3")
+
+## PC2 vs. PC3
+plot(eigenvectors[, 3], eigenvectors[, 4], 
+main = "PC2 vs PC3", xlab = "Principal Component 2", 
+ylab = "Principal Component 3")
+
+```
+
+

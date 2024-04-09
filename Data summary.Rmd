@@ -1,0 +1,1080 @@
+---
+title: "Data summary"
+output: pdf_document
+date: '2024-01-15'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(dplyr)
+library(writexl)
+library(ggplot2)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+library(openxlsx)
+library(janitor)
+library(matrixStats)
+library(data.table)
+opts_knit$set(root.dir = "~/Documents/Data")
+theme_set(theme_classic())
+```
+
+
+```{r, warning=FALSE}
+# import data
+cross_sec <- read_xlsx("Cross_Sectional_DATA_2023_12_01.xlsx")
+long <- read_xlsx("Longitudinal_Data_2023_12_01.xlsx")
+lung_tx <- read.csv("Lung_Transplant.csv")
+colnames(lung_tx) <- make_clean_names(colnames(lung_tx))
+modulator <- read.csv("Modulator_Longitudina.csv")
+colnames(modulator) <- make_clean_names(colnames(modulator))
+bcepacia <- read.csv("B_Cepacia_Longitudinal.csv")
+colnames(bcepacia) <- make_clean_names(colnames(bcepacia))
+```
+
+## Data checks 
+
+```{r}
+# check if individual has duplicates in cross-sectional data
+nrow(cross_sec) # 4370
+length(cross_sec$individual_name) # 4370
+
+# check longitudinal data
+# number of observations and individual 
+nrow(long) # 219374
+length(unique(long$individual_name)) # 4312
+
+# missing values 
+nrow(long[is.na(long$individual_name),]) # no missing id
+
+# 75 rows with missing age and dob
+nrow(long[is.na(long$long_encounter_age_yrs) & is.na(long$dob),]) 
+# 43 individuals with missing age and dob
+nrow(unique(long[is.na(long$long_encounter_age_yrs) & is.na(long$dob),"individual_name"])) 
+
+# 27513 rows with missing height
+nrow(long[is.na(long$long_height) & is.na(long$redcap_repeat_instance)==0,]) 
+# 2970 individuals with missing height
+nrow(unique(long[is.na(long$long_height) & is.na(long$redcap_repeat_instance)==0,
+                 "individual_name"])) 
+
+# 31738 rows with missing weight
+nrow(long[is.na(long$long_weight) & is.na(long$redcap_repeat_instance)==0,]) 
+# 3025 individuals with missing weight
+nrow(unique(long[is.na(long$long_weight) & is.na(long$redcap_repeat_instance)==0,
+                 "individual_name"])) 
+
+# 36942 rows with missing weight or height
+nrow(long[is.na(long$long_weight) | is.na(long$long_height),]) 
+# 4312 individuals with missing weight or height
+nrow(unique(long[is.na(long$long_weight) | is.na(long$long_height)==0,"individual_name"])) 
+
+# range for age, weight, and height
+min(long$long_encounter_age_yrs, na.rm = TRUE) # 0
+max(long$long_encounter_age_yrs, na.rm = TRUE) # 84.90523
+min(long$long_height, na.rm = TRUE) # -999
+max(long$long_height, na.rm = TRUE) # 200
+min(long$long_weight, na.rm = TRUE) # -999
+max(long$long_weight, na.rm = TRUE) # 190
+
+age0_ind <- long[long$long_encounter_age_yrs==0 & is.na(long$long_encounter_age_yrs)==0,
+                 "individual_name"]
+# people with age 0 had an encounter date on their dob
+age_check <- long[long$individual_name %in% age0_ind$individual_name,]
+
+neg_height <- long[long$long_height<0 & is.na(long$long_height)==0,]
+unique(neg_height$long_height) # -999
+neg_weight <- long[long$long_weight<0 & is.na(long$long_weight)==0,]
+unique(neg_weight$long_weight) # -999
+# recode these -999 as NA
+long[long$long_height<0 & is.na(long$long_height)==0,"long_height"] <- NA
+long[long$long_weight<0 & is.na(long$long_weight)==0,"long_weight"] <- NA
+
+# lung transplant 
+table(lung_tx$lung_transplant_status) # all yes, 497
+
+# modulator
+table(modulator$on_cftr_targeted_therapy) # 1812 yes, 7 no
+
+# bcepacia
+table(bcepacia$b_cepacia_status)
+table(bcepacia$burkholderia_cepacia) # identified by "grown" 
+
+```
+### Some observations had missing age/dob, height, or weight. Some also recorded -999 for height or weight as missing values. These are recoded as NA. 
+\
+Exclude those with no age/dob, height, or weight measurements. Keep only those from Canada (Toronto) for now. 
+\
+```{r}
+# merge the gwas iid, gwas fid, and dob info onto each row of the measurements
+long_id <- long[is.na(long$redcap_repeat_instance), 
+                c("individual_name", "gwas_iid","gwas_fid", "dob")]
+long_obs <- long[is.na(long$redcap_repeat_instance)==0, 
+                 !names(long) %in% c("gwas_iid","gwas_fid", "dob")]
+long2 <- merge(long_obs, long_id, by="individual_name",all=T)
+
+# select the first instance of lung transplant, modulator, or B cepacia infection
+# first modulator date
+modulator_first <- modulator %>%
+  filter(on_cftr_targeted_therapy == "Yes" & cftr_targeted_therapy_start_date != "") %>%
+  group_by(individual_id) %>%
+  arrange(individual_id, cftr_targeted_therapy_start_date) %>%
+  slice(1) %>%
+  rename(modulator_date = cftr_targeted_therapy_start_date)
+
+length(unique(modulator_first$individual_id)) # 1286
+table(modulator_first$repeat_instance)
+mod_ind <- modulator_first[modulator_first$repeat_instance != 1,]
+modulator[modulator$individual_id %in% mod_ind$individual_id, ]
+
+# first B cepacia infection
+first_bcepacia <- bcepacia %>%
+  filter(grepl("Grown", burkholderia_cepacia, ignore.case = TRUE)) %>%
+  group_by(individual_id) %>%
+  arrange(individual_id, encounter_date) %>%
+  slice(1) %>%
+  rename(bcepacia_date = encounter_date)
+  
+  
+length(unique(first_bcepacia$individual_id)) # 401
+table(first_bcepacia$burkholderia_cepacia)
+
+# lung transplant
+length(unique(lung_tx$individual_id)) # 497 - 1 pt per line
+
+# merge first modulator date, first B cepacia date, and lung transplant date to phenotype dataset
+long2 <- long2 %>%
+  left_join(modulator_first[,c("individual_id", "modulator_date")], by = c("individual_name"="individual_id")) %>%
+  left_join(first_bcepacia[, c("individual_id", "bcepacia_date")], by = c("individual_name"="individual_id")) %>%
+  left_join(lung_tx[, c("individual_id", "lung_transplant_date")], by = c("individual_name"="individual_id"))
+
+long2 <- long2 %>%
+  mutate(modulator_date = as.Date(modulator_date)) %>%
+  mutate(bcepacia_date = as.Date(bcepacia_date)) %>%
+  mutate(lung_transplant_date = as.Date(lung_transplant_date))
+
+# create the minimum date among the 3 
+long2$cutoff_date <- do.call(pmin, c(long2[c("modulator_date", "bcepacia_date", "lung_transplant_date")], na.rm = TRUE))
+
+
+# keep only rows with age, height, and weight
+long2 <- long2[complete.cases(long2$dob, long2$long_height, long2$long_weight), ]
+
+# Some people have only dob but no encounter age - calculate those
+long2$long_encounter_age_yrs <- ifelse(is.na(long2$long_encounter_age_yrs), 
+                                       interval(long2$dob, long2$long_encounter_date) 
+                                       %/% years(1), 
+                                       long2$long_encounter_age_yrs) 
+
+# Some have missing encounter date - drop those
+long2 <- long2[is.na(long2$long_encounter_date)==0,]
+
+nrow(long2) #180243
+length(unique(long2$individual_name)) #4277
+
+# keep only those from toronto
+toronto <- cross_sec[cross_sec$cohort=="TOR","individual_name"]
+long2 <- long2[long2$individual_name %in% toronto$individual_name,]
+length(unique(long2$individual_name)) # 3423
+
+# Remove encounters after patient's cutoff date (earliest of modulator, B cepacia, or lung transplant date)
+long2 <- long2[long2$long_encounter_date <= long2$cutoff_date | is.na(long2$cutoff_date)==1, ]
+length(unique(long2$individual_name)) # 3370
+
+# Patients over 50 years old
+length(unique(long2[long2$long_encounter_age_yrs>=70,"individual_name"])) # 27
+
+```
+### This leaves us with 3370 patients. 27 patient was at least 50 years old for at least one encounter.
+
+\
+Flag adults and children observations and separate into 2 age groups. Those who had at least 1 measurement taken at or after 18 years old would be in the adult group. Those who only had measurements before 18 would be in the child group.
+
+
+```{r}
+# number each observation per patient by encounter time 
+# (since redcap instance is not numbered based on encounter date order)
+long2 <- long2 %>%
+  group_by(individual_name) %>%
+  arrange(individual_name, long_encounter_date) %>%
+  mutate(enc_num = row_number())
+
+# flag those who had at least 1 measurement for adult 
+long2$adult <- ifelse(long2$long_encounter_age_yrs >= 18, 1, 
+                      ifelse(is.na(long2$long_encounter_age_yrs)==0,0,NA))
+
+# flag those who had at least 1 measurement for pediatric 
+long2$child <- ifelse(long2$long_encounter_age_yrs < 18, 1, 
+                      ifelse(is.na(long2$long_encounter_age_yrs)==0,0,NA))
+long2 <- long2 %>%
+  group_by(individual_name) %>%
+  mutate(adult_ever = max(adult),
+         child_only = ifelse(child==1 & adult_ever == 0, 1, 0))
+
+long2 %>%
+  group_by(adult_ever) %>%
+  summarise(n = n_distinct(individual_name))
+
+# generate new time variable for later use - time to first observation
+# Calculate change in height, weight, and age from previous observation
+
+long2 <- long2 %>%
+  group_by(individual_name) %>%
+  mutate(time = as.numeric(difftime(long_encounter_date, first(long_encounter_date), 
+                                    unit = "days")),
+         diff_time = as.numeric(difftime(long_encounter_date, lag(long_encounter_date), 
+                                         units = "days")))
+
+# duplicated rows (identical encounter date)
+long2 <- long2 %>%
+  distinct(individual_name, long_encounter_date, .keep_all = TRUE)
+
+
+long2 <- long2 %>%
+  group_by(individual_name) %>%
+  mutate(diff_height = long_height - lag(long_height),
+         diff_weight = long_weight - lag(long_weight),
+         prev_age = lag(long_encounter_age_yrs))
+# adult data
+long_adult <- long2[long2$adult_ever==1,]
+length(unique(long_adult$individual_name)) # 2528
+
+# child data
+long_child <- long2[long2$adult_ever==0,]
+length(unique(long_child$individual_name)) # 842
+
+```
+### There are 2528 in the adult group and 842 in the child group.
+
+Check for abnormal height and weight measurements.
+\
+Height:
+\
+```{r}
+# Check for outliers
+boxplot(long_adult[long_adult$long_encounter_age_yrs>=18,"long_height"], 
+        main = "Boxplot - Height (Adults)")
+boxplot(long_child$long_height, ylim = c(0,200), main = "Boxplot - Height (Children)")
+
+
+# look at individual trajectory using Spaghetti plot
+set.seed(982375)
+random_adult <- sample(unique(long_adult$individual_name), 50)
+random_chd <- sample(unique(long_child$individual_name), 20)
+
+long_adult_random <- long_adult[long_adult$individual_name %in% random_adult & 
+                                  long_adult$long_encounter_age_yrs>=18, ]
+long_child_random <- long_child[long_child$individual_name %in% random_chd, ]
+
+# Spaghetti plot - height
+ggplot(long_adult_random, aes(x = time, y = long_height, group = individual_name, 
+                              color = as.factor(individual_name))) +
+  geom_line(show.legend = FALSE) +
+  labs(title = "Spaghetti Plot - Height (Adults)",
+       x = "Time (days)",
+       y = "Height (cm)") 
+
+ggplot(long_child_random, aes(x = time, y = long_height, group = individual_name, 
+                              color = as.factor(individual_name))) +
+  geom_line(show.legend = FALSE) +
+  labs(title = "Spaghetti Plot - Height (Children)",
+       x = "Time (days)",
+       y = "Height (cm)")
+```
+
+### Among adults, there are many outliers with very low height. The spaghetti plot showed sudden drops in height for some people in the sample, which was due to data entry errors.
+
+### Among children, there aren't much outliers, but the spaghetti plot does show some decrease/fluctuations in height for some patients, which might be due to data entry or measurement errors.
+
+Pick out potential measurement errors:
+\
+```{r}
+# get the mode of height for adults
+get_mode <- function(x) {
+  tbl <- table(x)
+  mode_value <- as.numeric(names(tbl)[which.max(tbl)])
+  return(mode_value)
+}
+
+height_mode <- long_adult %>%
+  filter(long_encounter_age_yrs >= 18) %>%
+  group_by(individual_name) %>%
+  summarise(height_mode = get_mode(long_height))
+
+long_adult <- merge(long_adult, height_mode, by="individual_name",all=T)
+
+long_adult <- long_adult %>%
+  mutate(diff_height_mode = ifelse(long_encounter_age_yrs>=18, long_height - height_mode, NA))
+  
+# Those with height differs > +/- 5cm from their mode after 20 years old are likely due to errors in data
+height_error <- long_adult[abs(long_adult$diff_height_mode)>5 
+                           & long_adult$long_encounter_age_yrs>=20,]
+height_error2 <- long_adult[long_adult$individual_name %in% height_error$individual_name,]
+length(unique(height_error2$individual_name)) # 106
+
+# Some examples
+height_error2[height_error2$individual_name %in% c("AFO3875-03","AFO3911-03"), 
+              c("individual_name", "long_encounter_age_yrs", "long_height", 
+                "diff_height_mode")]
+```
+
+### Comparing height with median height after 18 captures obvious data entry errors. However, some patients have increasing height (> 5cm) even at 30 or 40 years old, some have large fluctuations in height to a point where it's hard to tell what their actual height is. Should we drop these patients entirely?
+
+
+```{r}
+
+# Those with height decrease > 4cm before 20 years old 
+height_chd_error <- long_adult[long_adult$diff_height< -4 & is.na(long_adult$diff_height)==0 
+                               & long_adult$long_encounter_age_yrs<20,]
+height_chd_error2 <- long_adult[long_adult$individual_name %in% height_chd_error$individual_name,]
+length(unique(height_chd_error2$individual_name)) # 123
+
+# Some examples
+height_chd_error2[height_chd_error2$individual_name %in% c("AUP1348-06","BCH0129-03"), 
+              c("individual_name", "long_encounter_age_yrs", "long_height", "diff_height")]
+
+height_chd_error3 <- long_child[long_child$diff_height< -4 & is.na(long_child$diff_height)==0,]
+height_chd_error4 <- long_child[long_child$individual_name %in% height_chd_error3$individual_name,]
+length(unique(height_chd_error4$individual_name)) # 38
+
+# Some examples
+as.data.frame(height_chd_error4[height_chd_error4$individual_name %in% 
+                                  c("ACH14018-03", "BCH12013-03"), 
+              c("individual_name", "long_encounter_age_yrs", "long_height", "diff_height")])
+
+```
+
+### When looking at height at age < 20, some patients again have large fluctuations, while some had a drop in height that remained till adulthood. 
+
+### Some had an increase before a drop in height, where the increase in height was a potential error.
+\
+Check for weight:
+\
+```{r}
+# Check for outliers
+boxplot(long_adult[long_adult$long_encounter_age_yrs>=18,"long_weight"], ylim = c(0, 200), 
+        main = "Boxplot - Weight (Adults)")
+boxplot(long_child$long_weight, main = "Boxplot - Weight (Children)")
+
+# look at individual trajectory using Spaghetti plot
+ggplot(long_adult_random, aes(x = time, y = long_weight, group = individual_name, 
+                              color = as.factor(individual_name))) +
+  geom_line(show.legend = FALSE) +
+  labs(title = "Spaghetti Plot - Weight (Adults)",
+       x = "Time (days)",
+       y = "Weight (kg)")
+
+ggplot(long_child_random, aes(x = time, y = long_weight, group = individual_name, 
+                              color = as.factor(individual_name))) +
+  geom_line(show.legend = FALSE) +
+  labs(title = "Spaghetti Plot - Weight (Children)",
+       x = "Time (days)",
+       y = "Weight (kg)")
+
+
+# Those with weight changes > +/- 5 kg per 30 days and > 20 kg difference from last measurement 
+# are likely due to errors in data
+long_adult$diff_weight_mon <- round(long_adult$diff_weight*30/long_adult$diff_time, 2)
+weight_error <- long_adult[abs(long_adult$diff_weight_mon)>5 & 
+                             abs(long_adult$diff_weight)>20 & 
+                             is.na(long_adult$diff_weight_mon)==0,]
+weight_error2 <- long_adult[long_adult$individual_name %in% weight_error$individual_name,]
+length(unique(weight_error2$individual_name)) # 61
+
+long_child$diff_weight_mon <- round(long_child$diff_weight*30/long_child$diff_time, 2)
+weight_chd_error <- long_child[abs(long_child$diff_weight_mon)>5 & 
+                                 abs(long_child$diff_weight)>20 & 
+                                 is.na(long_child$diff_weight_mon)==0,]
+weight_chd_error2 <- long_child[long_child$individual_name %in% weight_chd_error$individual_name,]
+length(unique(weight_chd_error2$individual_name)) 
+
+# Some examples
+weight_error2[weight_error2$individual_name %in% c("ACH1203-03","AUA1408-03"), 
+              c("individual_name", "long_encounter_age_yrs", "long_weight", "diff_weight")]
+
+
+```
+
+### Outliers exist for both adults and children, and the spaghetti plot showed some sudden increase/drop in weight for some patients, sugesting potential data error. 
+
+### Similar to height, some patients had fluctuations in weight within a short time frame, making it hard to tell which and if any of those measurements were accurate.
+
+\
+
+Modify the potential errors for the last 3 measurements
+
+```{r}
+last3_adult <- long_adult %>%
+  group_by(individual_name) %>%
+  filter(long_encounter_age_yrs>=18) %>%
+  mutate(num_obs = n()) %>%
+  filter(num_obs>=3) %>%
+  slice_tail(n = 3)
+
+length(unique(last3_adult$individual_name))  # dropped from 2528 to 2408
+
+last3_child <- long_child %>%
+  group_by(individual_name) %>%
+  mutate(num_obs = n()) %>%
+  filter(num_obs>=3) %>%
+  slice_tail(n = 3) %>%
+  mutate(diff_height = long_height - lag(long_height))
+
+length(unique(last3_child$individual_name))  # dropped from 842 to 815
+
+# Those with height changes > +/- 5cm after 20 years old are likely due to errors in data
+height3_error <- last3_adult[abs(last3_adult$diff_height_mode)>5 & last3_adult$prev_age>20 
+                             & is.na(last3_adult$individual_name)==0,]
+height3_error2 <- last3_adult[last3_adult$individual_name %in% height3_error$individual_name,]
+length(unique(height3_error2$individual_name)) # 51 
+
+height3_error2[, c("individual_name", "long_encounter_age_yrs", "long_height", 
+                   "height_mode", "diff_height_mode")]
+
+
+height3_error_full <- long_adult[long_adult$individual_name %in% height3_error$individual_name,]
+
+# hw_file_path <- "~/Documents/Analysis/Height and weight errors.xlsx"
+# wb <- loadWorkbook(hw_file_path)
+# 
+# # Add a new sheet to the existing workbook
+# addWorksheet(wb, sheetName = "height")
+# 
+# # Write the data frame to the new sheet
+# writeData(wb, sheet = "height", height3_error_full)
+# 
+# # Save the modified workbook
+# saveWorkbook(wb, hw_file_path, overwrite = TRUE)
+
+```
+
+For adults, 28 patients had abnormal heights in their last 3 measurements (when compared to their mode after 18 years old). After checking a few, it seems that the mode seems to be the more "correct" height except for some cases where they oscillate between 2 very different heights (e.g., patient BSP21121-03), or seems to gradually shrink in height (AFO3927-03). \
+
+Overall, I think it would make sense to convert the abnormal height to their mode. 
+	
+```{r}
+# In the child group, Those with height decrease > 4cm before 20 years old 
+height3_chd_error <- last3_child[last3_child$diff_height< -4 & is.na(last3_child$diff_height)==0,]
+height3_chd_error2 <- last3_child[last3_child$individual_name %in% height3_chd_error$individual_name,]
+length(unique(height3_chd_error2$individual_name)) # 2
+
+height_chd <- as.data.frame(long_child[long_child$individual_name %in% height3_chd_error$individual_name, 
+           c("individual_name", "long_encounter_age_yrs", "long_height", "diff_height")])
+
+```
+
+For children, only 2 had height measurement error in their last 3 measurements. One seemed to have incorrect height for their last 2 measurement, while the other had an error on their third to last measurement. I think these can be reviewed on a case by case basis and adjust accordingly.
+
+
+```{r}
+# Those with weight changes > +/- 4 kg per 30 days & changes > +/- 20 kg from last 
+# observation are likely due to errors in data
+## adults
+last3_adult$diff_weight_mon <- round(last3_adult$diff_weight*30/last3_adult$diff_time, 2)
+weight3_error <- last3_adult[abs(last3_adult$diff_weight_mon)>4 & abs(last3_adult$diff_weight)>20 
+                             & is.na(last3_adult$diff_weight_mon)==0,]
+weight3_error2 <- last3_adult[last3_adult$individual_name %in% weight3_error$individual_name,]
+length(unique(weight3_error2$individual_name)) 
+# About 5 adults have weight measurement errors in their last 3 measurements
+
+weight3_error2[, c("individual_name", "long_encounter_age_yrs", "long_weight", "diff_weight")]
+weight3_error_full <- long_adult[long_adult$individual_name %in% weight3_error$individual_name,]
+
+# # Add a new sheet to the existing workbook
+# addWorksheet(wb, sheetName = "weight")
+# 
+# # Write the data frame to the new sheet
+# writeData(wb, sheet = "weight", weight3_error_full)
+# 
+# # Save the modified workbook
+# saveWorkbook(wb, hw_file_path, overwrite = TRUE)
+
+
+## children
+last3_child$diff_weight_mon <- round(last3_child$diff_weight*30/last3_child$diff_time, 2)
+weight3_chd_error <- last3_child[abs(last3_child$diff_weight_mon)>4 & abs(last3_child$diff_weight)>20 
+                                 & is.na(last3_child$diff_weight_mon)==0,]
+weight3_chd_error2 <- last3_child[last3_child$individual_name %in% weight3_chd_error$individual_name,]
+length(unique(weight3_chd_error2$individual_name)) 
+# About 3 kids have potential weight measurement errors in their last 3 measurements
+
+weight3_chd_error2[, c("individual_name", "long_encounter_age_yrs", "long_weight", "diff_weight")]
+as.data.frame(long_child[long_child$individual_name %in% weight3_chd_error$individual_name, 
+           c("individual_name", "long_encounter_age_yrs", "long_weight", "diff_weight")])
+# it seemed that only 1 kid had an actual error in their last 3 measurement. The 
+# other ones are due to errors in the previous measurement
+
+```
+
+Some are actual errors while some are a bit hard to tell - could change on a case by case basis.
+\
+
+## Data cleaning 
+
+For those with potential errors in their last 3 observations, drop these and re-select their last 3 observations:
+```{r}
+# Adults
+## remove the patients whose height has been fluctuating/had a sudden change where it's hard to tell what the actual height is
+## patients with more than 1 consecutive row of "incorrect" height will also be dropped since it might be mix ups
+## These patients were selected manually
+# height_drop_pts <- c("AFO3938-03", "BCH0205-03", "BSP0036-03", "BSP21121-03", "NIW2397-03", 
+#                      "OGR2826-04", "OGR2833-03", "OSK0373-03", "OSK0412-03", "OSK0464-03", 
+#                      "OSM1789-03", "OSM1908-03", "OTA2572-03", "OTP2680-03", "QCH3413-03",
+#                      "QDM0606-03", "QDM0762-03", "QHC3453-03", "QHC3499-03", "QMC2280-03",
+#                      "QDM0733-03", "QUL28159-03")
+
+height_drop_pts <- c("AFO3911-03", "AFO3938-03", "BCH0205-03", "MRP3019-03", "OGR2833-03", 
+                     "OSK0373-03", "OSM1908-03", "OTP2680-03", "QDM0606-03", "QDM0762-03",
+                     "QHC3499-03", "QMC2280-03", "QUL28159-03", "AUP1348-06")
+
+
+## After manually checking the patients with abnormal weights, some didn't need any modification, while some observations
+## seem to be incorrect and need to be dropped
+## Some patients had very inconsistent weight and height, and would have already been dropped 
+## due to height (BCH0205-03)
+# weight_mod_pts <- c("BSP0094-03", "OSK0501-03", "QDM0689-04", "QDM0753-03", "QSB3796-03")
+
+weight_mod_pts <- c("FJC2245-03", "QDM0689-04", "QDM0753-03")
+
+## flag the first change in weight 
+long_adult <- long_adult %>%
+  group_by(individual_name) %>%
+  mutate(weight_real_change = ifelse(abs(diff_weight)>20 & abs(lag(diff_weight))<=20, 1, 0))
+
+## remove them from the overall dataset and remove the rows where the height is +/- different from the mode
+last3_adult_clean <- long_adult %>%
+  filter(!individual_name %in% height_drop_pts) %>%
+  group_by(individual_name) %>%
+  filter(long_encounter_age_yrs>=18 & abs(diff_height_mode)<=5) %>%
+  filter(!(individual_name %in% weight_mod_pts & weight_real_change==1)) %>%
+  mutate(num_obs = n()) %>%
+  filter(num_obs>=3) %>%
+  slice_tail(n = 3)
+
+length(unique(last3_adult_clean$individual_name)) #2394
+
+# checks
+check <- last3_adult_clean[last3_adult_clean$individual_name %in% height3_error2$individual_name,]
+last3_adult_clean[abs(last3_adult_clean$diff_height_mode)>5 & last3_adult_clean$prev_age>20 
+                             & is.na(last3_adult_clean$individual_name)==0,]
+# last3_adult_clean[abs(last3_adult_clean$diff_weight_mon)>4 & abs(last3_adult_clean$diff_weight)>20 
+#                              & is.na(last3_adult_clean$diff_weight_mon)==0,]
+long_adult[long_adult$individual_name=="AUA1468-03",]
+long_adult[long_adult$individual_name=="QDM0689-04",]
+long_adult[long_adult$individual_name=="QDM0753-03",]
+# all good
+
+# check outliers
+check_h1 <- last3_adult_clean[last3_adult_clean$long_height <= 140, ]
+long_adult[long_adult$individual_name %in% check_h1$individual_name,]
+check_h2 <- last3_adult_clean[last3_adult_clean$long_height >= 190, ]
+long_adult[long_adult$individual_name %in% check_h2$individual_name,]
+check_w1 <- last3_adult_clean[last3_adult_clean$long_weight <= 40, ]
+long_adult[long_adult$individual_name %in% check_w1$individual_name,]
+# "AUP1348-06" seems to have fluctuating weight and height, added to the list above to remove
+check_w2 <- last3_adult_clean[last3_adult_clean$long_weight >= 120, ]
+long_adult[long_adult$individual_name %in% check_w2$individual_name,]
+
+
+```
+
+## Data exploration and summary
+
+For last 3 measurements:
+
+```{r}
+# Combine adult and child datasets
+last3 <- rbind(last3_adult_clean, last3_child)
+
+# number of measurements per person & length of follow up
+last3 <- last3 %>%
+  group_by(individual_name) %>%
+  mutate(len_fu = (difftime(max(long_encounter_date),min(long_encounter_date), 
+                            units = "days")))
+
+last3$len_fu_mon <- as.numeric(last3$len_fu)/30
+
+# time intervals between each measurement
+last3 <- last3 %>%
+  arrange(individual_name, long_encounter_date) %>%
+  group_by(individual_name) %>%
+  mutate(diff_obs = difftime(long_encounter_date, lag(long_encounter_date), 
+                             units = "days"))
+
+last3$diff_obs_mon <- as.numeric(last3$diff_obs)/30
+
+# check outliers
+check_fu1 <- last3 %>%
+  group_by(individual_name) %>%
+  mutate(max_min_weight = max(long_weight) - min(long_weight)) %>%
+  filter(diff_obs_mon >= 24 & max_min_weight >= 10 & adult_ever == 1) %>%
+  ungroup
+
+last3[last3$individual_name %in% check_fu1$individual_name,]
+
+check_fu2 <- last3 %>%
+  filter(diff_obs_mon >= 50)
+
+last3[last3$individual_name %in% check_fu2$individual_name,]
+# Some outliers had consistent weight or < 10kg change between the encounters so it's OK to keep
+
+check_fu3 <- last3 %>%
+  filter(len_fu_mon <= 1)
+
+
+fu3_list <- long_adult[long_adult$individual_name %in% check_fu3$individual_name & long_adult$diff_weight>=10,"individual_name"]
+long_adult[long_adult$individual_name %in% fu3_list$individual_name,]
+# BCH0188-03 lost 13 kg in 3 months (last 3 measurements were consistent but lower than the previous ones). However, they only have 3 encounters >= 18 - still keep 
+# OSM1859-03 has been losing weight before the last 3 measurements, but the last 3 were the lowest weight of the patient - keep for now
+
+
+# Those with a large gap (>= 24 months) between their last and second last encounter and a great change (>= 10 kg) in their weight
+# fu_drop <- c("BCH0137-03", "BSP0091-03", "NIW2366-03", "NIW2435-03", "NSA2901-03", "QCH3382-03", "QDM0651-03", "SCA2151-03") # 8
+fu_drop <- c("NIW2435-03", "NSA2901-03", "QDM0651-03") # 3
+
+long_adult[long_adult$individual_name %in% fu_drop,]
+# NIW2435-03 only had 3 encounters in adulthood - can't drop any
+
+# drop the last encounter for these 7 patients and take their previous one
+fu_drop2 <- c("NSA2901-03", "QDM0651-03") 
+
+# remove those patients from the list first and will merge them back later
+last3_nofu <- last3 %>%
+  filter(!individual_name %in% fu_drop2)
+
+# select the last 3 rows of the 7 pts above after dropping the last encounter
+last3_fu_drop <- long_adult %>%
+  filter(individual_name %in% fu_drop2) %>%
+  group_by(individual_name) %>%
+  filter(long_encounter_age_yrs>=18) %>%
+  slice(n() - 3L: -1L) %>%
+  filter(row_number() < n()) %>%
+  mutate(len_fu = (difftime(max(long_encounter_date),min(long_encounter_date), 
+                            units = "days")),
+         len_fu_mon = as.numeric(len_fu)/30,
+         diff_obs = difftime(long_encounter_date, lag(long_encounter_date), 
+                             units = "days"),
+         diff_obs_mon = as.numeric(diff_obs)/30)
+  
+
+
+last3 <- rbind(last3_nofu, last3_fu_drop)
+last3 <- arrange(last3, individual_name, long_encounter_date)
+  
+
+# explore mean and median for last 3 height and weight measurements
+last3 <- last3 %>%
+  group_by(individual_name) %>%
+  mutate(height_mean = mean(long_height),
+         height_median = median(long_height),
+         weight_mean = mean(long_weight),
+         weight_median= median(long_weight),
+         bmi_mean = weight_mean/(height_mean/100)^2,
+         bmi_median = weight_median/(height_median/100)^2,
+         interval_mean = mean(diff_obs, na.rm = T),
+         interval_mon_mean = mean(diff_obs_mon, na.rm = T))
+
+
+# summarize by age group
+summary_by_age_last3 <- last3 %>%
+  group_by(adult_ever) %>%
+  summarise(
+    Total_count = n_distinct(individual_name),  # Count of values in each group
+    Mean_age = mean(long_encounter_age_yrs, na.rm = T),
+    sd_age = sd(long_encounter_age_yrs, na.rm = T),
+    Median_age = median(long_encounter_age_yrs, na.rm = T),
+    Min_age = min(long_encounter_age_yrs, na.rm = T),
+    Max_age = max(long_encounter_age_yrs, na.rm = T),
+    Mean_bmi_mean = mean(bmi_mean, na.rm = T),
+    sd_bmi_mean = sd(bmi_mean, na.rm = T),
+    Median_bmi_mean = median(bmi_mean, na.rm = T),
+    Min_bmi_mean = min(bmi_mean, na.rm = T),
+    Max_bmi_mean = max(bmi_mean, na.rm = T),
+    Mean_bmi_median = mean(bmi_median, na.rm = T),
+    sd_bmi_median = sd(bmi_median, na.rm = T),
+    Median_bmi_median = median(bmi_median, na.rm = T),
+    Min_bmi_median = min(bmi_median, na.rm = T),
+    Max_bmi_median = max(bmi_median, na.rm = T),
+    Mean_height_mean = mean(height_mean, na.rm = T),
+    sd_height_mean = sd(height_mean, na.rm = T),
+    Median_height_mean = median(height_mean, na.rm = T),
+    Min_height_mean = min(height_mean, na.rm = T),
+    Max_height_mean = max(height_mean, na.rm = T),
+    Mean_height_median = mean(height_median, na.rm = T),
+    sd_height_median = sd(height_median, na.rm = T),
+    Median_height_median = median(height_median, na.rm = T),
+    Min_height_median = min(height_median, na.rm = T),
+    Max_height_median = max(height_median, na.rm = T),
+    Mean_weight_mean = mean(weight_mean, na.rm = T),
+    sd_weight_mean = sd(weight_mean, na.rm = T),
+    Median_weight_mean = median(weight_mean, na.rm = T),
+    Min_weight_mean = min(weight_mean, na.rm = T),
+    Max_weight_mean = max(weight_mean, na.rm = T),
+    Mean_weight_median = mean(weight_median, na.rm = T),
+    sd_weight_median = sd(weight_median, na.rm = T),
+    Median_weight_median = median(weight_median, na.rm = T),
+    Min_weight_median = min(weight_median, na.rm = T),
+    Max_weight_median = max(weight_median, na.rm = T),
+    mean_len_fu_mon = mean(len_fu_mon, na.rm = T),
+    sd_len_fu_mon = sd(len_fu_mon, na.rm = T),
+    Median_len_fu_mon = median(len_fu_mon, na.rm = T),
+    Min_len_fu_mon = min(len_fu_mon, na.rm = T),
+    Max_len_fu_mon = max(len_fu_mon, na.rm = T),
+    mean_interval_mon = mean(diff_obs_mon, na.rm = T),
+    sd_interval_mon = sd(diff_obs_mon, na.rm = T),
+    Median_interval_mon = median(diff_obs_mon, na.rm = T),
+    Min_interval_mon = min(diff_obs_mon, na.rm = T),
+    Max_interval_mon = max(diff_obs_mon, na.rm = T),
+    mean_num_obs = mean(num_obs, na.rm = T),
+    sd_num_obs = sd(num_obs, na.rm = T),
+    Median_num_obs = median(num_obs, na.rm = T),
+    Min_num_obs = min(num_obs, na.rm = T),
+    Max_num_obs = max(num_obs, na.rm = T)
+  )
+
+summ_file_path <- "~/Documents/Analysis/prelim_summary.xlsx"
+summ_wb <- loadWorkbook(summ_file_path)
+
+if ("raw_output" %in% getSheetNames(summ_file_path)) {
+  removeWorksheet(summ_wb, "raw_output")
+}
+
+# Add a new sheet to the existing workbook
+addWorksheet(summ_wb, sheetName = "raw_output")
+
+# Write the data frame to the new sheet
+writeData(summ_wb, sheet = "raw_output", summary_by_age_last3)
+
+# Save the modified workbook
+saveWorkbook(summ_wb, summ_file_path, overwrite = TRUE)
+
+
+```
+
+## Merge with cross-sectional patient characteristics
+
+```{r}
+# Since mean and median BMI for the last 3 measurements are very similar, we'll be using the mean BMI 
+## have 1 row per patient
+phenotype_adult <- last3 %>%
+  filter(adult_ever==1) %>%
+  group_by(individual_name) %>%
+  mutate(age_mean = mean(long_encounter_age_yrs)) %>%
+  select(individual_name, num_obs, len_fu, len_fu_mon, interval_mean, 
+         interval_mon_mean, age_mean, height_mean, weight_mean, bmi_mean) %>%
+  slice_head(n=1) # 2394
+
+## merge with patient characteristics
+merge_adult <- merge(phenotype_adult, cross_sec, by = "individual_name")
+
+# add in cleaned allele scores
+full_cftr <- read.csv("~/Documents/Data/CFGeneModifierStudy-BMICrossSectionalDat_DATA_2024-03-28_1223.csv")
+full_cftr <- full_cftr %>%
+  rename(allele_1_s = allele1_score,
+         allele_2_s = allele2_score)
+merge_adult <- merge(merge_adult, full_cftr[,c("individual_name", "allele_1_s", "allele_2_s")], by="individual_name", all.x = T)
+
+
+merge_adult <- merge_adult %>%
+  mutate(allele1_score = ifelse(is.na(allele1_score), allele_1_s, allele1_score),
+         allele2_score = ifelse(is.na(allele2_score), allele_2_s, allele2_score),
+         # clean up/fill in allele score 
+         allele1_score2 = case_when(allele1=="delF508" ~ 3,
+                                    allele1=="3849+10kbC>T" ~ 1,
+                                    allele1=="Q493X" ~ 4,
+                                    allele1=="A455E" ~ 1,
+                                    allele1=="G542X" ~ 4,
+                                    allele1=="P67L" ~ 1),
+         allele2_score2 = case_when(allele2=="delF508" ~ 3,
+                                    allele2=="Q493X" ~ 4,
+                                    allele2=="A455E" ~ 1,
+                                    sequenced_allele2=="G542X" ~ 4,
+                                    allele2=="P67L" ~ 1,
+                                    allele2=="L206W;R668C" ~ 1),
+         allele1_score = ifelse(is.na(allele1_score2)==0 & is.na(allele1_score), allele1_score2, allele1_score),
+         allele2_score = ifelse(is.na(allele2_score2)==0 & is.na(allele2_score), allele2_score2, allele2_score))
+
+
+pt_miss <- phenotype_adult[!(phenotype_adult$individual_name %in% full_cftr$individual_name),]
+
+## create CFTR severity score
+merge_adult <- merge_adult %>%
+  mutate(CFTR_score = ifelse(allele1_score==1 | allele2_score==1, 1, 
+                              ifelse(allele1_score==2 | allele2_score==2, 2,
+                                     ifelse(allele1_score==3 & allele2_score==3, 3,
+                                            ifelse(allele1_score==4 & allele2_score==4, 5, 4))))) %>%
+  rename(age = age_mean,
+         height = height_mean,
+         weight = weight_mean,
+         bmi = bmi_mean)
+
+# merge_adult$CFTR_score <- ifelse(is.na(merge_adult$CFTR_score), 0, merge_adult$CFTR_score)
+merge_adult$panc_function_geno_pred <- ifelse(merge_adult$panc_function_geno_pred=="NA", NA, merge_adult$panc_function_geno_pred)
+
+```
+
+## get those who have genotype data
+```{r}
+# people with genotype data
+genotype_id <- read.csv("~/Documents/Data/File-CF-GMS-N12901samples-N12026individuals-with-cpdrid-or-individualname-20231229.csv")
+iid_data <- read.table("~/Documents/Data/Merged-TOPMed-7arrays-10XG-PacBioHIFI-N5467-n7217886-postQC-mergeID.fam", header = FALSE)[,1:2]
+colnames(iid_data) <- c("iid", "cpdr_patient_id")
+fid_data <- read.table("~/Documents/Data/Merged-TOPMed-7arrays-10XG-PacBioHIFI-N5467-n7217886-postQC.fam", header = FALSE)[,1:2]
+colnames(fid_data) <- c("fid", "iid")
+
+adult_full <- merge(merge_adult, genotype_id, by.x = "cpdr_patient_id", by.y = "uniqueID") # 2576 rows
+adult_full <- merge(adult_full, iid_data, by = "cpdr_patient_id") # 2562 rows
+adult_full <- merge(adult_full, fid_data, by = "iid") # 2562 rows
+
+# check duplicates
+d <- adult_full[duplicated(adult_full$iid),] # 357 people had multiple rows - array + sequencing or different genotyping platfomrs
+adult_full[adult_full$iid %in% d$iid,]
+
+# remove duplicates for summarizing
+adult_nodup <- adult_full %>%
+  distinct(iid, .keep_all = TRUE) # 2205
+
+# check 
+a <- adult_nodup %>%
+  filter(age >= 70)
+# 21 patients were least 70 years old and 1 patient (77 years old) had PI 
+
+
+# output fid and iid into txt 
+write.table(adult_nodup[, c("fid", "iid")], file = "subjects_keep.txt", row.names = F, 
+            col.names = F,quote = FALSE)
+
+# output IID in format of non-imputed Omni25 data for testing
+adult_full$IID <- gsub("_", "-", adult_full$IID, fixed = TRUE)
+adult_omni25 <- adult_full[adult_full$platform=="Omni25",]
+write.table(adult_omni25[, c("FID", "IID")], file = "subjects_omni25.txt", row.names = F, 
+            col.names = F,quote = FALSE)
+
+
+# continuous data summary
+summary_adult_cont <- adult_nodup %>%
+  summarise(
+    Total_count = n_distinct(individual_name),  # Count of values in each group
+    Mean_age = mean(age, na.rm = T),
+    sd_age = sd(age, na.rm = T),
+    Median_age = median(age, na.rm = T),
+    Min_age = min(age, na.rm = T),
+    Max_age = max(age, na.rm = T),
+    Mean_bmi = mean(bmi, na.rm = T),
+    sd_bmi = sd(bmi, na.rm = T),
+    Median_bmi = median(bmi, na.rm = T),
+    Min_bmi = min(bmi, na.rm = T),
+    Max_bmi = max(bmi, na.rm = T),
+    Mean_height = mean(height, na.rm = T),
+    sd_height = sd(height, na.rm = T),
+    Median_height = median(height, na.rm = T),
+    Min_height = min(height, na.rm = T),
+    Max_height = max(height, na.rm = T),
+    Mean_weight = mean(weight, na.rm = T),
+    sd_weight = sd(weight, na.rm = T),
+    Median_weight = median(weight, na.rm = T),
+    Min_weight = min(weight, na.rm = T),
+    Max_weight = max(weight, na.rm = T),
+    mean_len_fu = mean(len_fu, na.rm = T),
+    sd_len_fu = sd(len_fu, na.rm = T),
+    Median_len_fu = median(len_fu, na.rm = T),
+    Min_len_fu = min(len_fu, na.rm = T),
+    Max_len_fu = max(len_fu, na.rm = T),
+    mean_len_fu_mon = mean(len_fu_mon, na.rm = T),
+    sd_len_fu_mon = sd(len_fu_mon, na.rm = T),
+    Median_len_fu_mon = median(len_fu_mon, na.rm = T),
+    Min_len_fu_mon = min(len_fu_mon, na.rm = T),
+    Max_len_fu_mon = max(len_fu_mon, na.rm = T),
+    mean_interval = mean(interval_mean, na.rm = T),
+    sd_interval = sd(interval_mean, na.rm = T),
+    Median_interval = median(interval_mean, na.rm = T),
+    Min_interval = min(interval_mean, na.rm = T),
+    Max_interval = max(interval_mean, na.rm = T),
+    mean_interval_mon = mean(interval_mon_mean, na.rm = T),
+    sd_interval_mon = sd(interval_mon_mean, na.rm = T),
+    Median_interval_mon = median(interval_mon_mean, na.rm = T),
+    Min_interval_mon = min(interval_mon_mean, na.rm = T),
+    Max_interval_mon = max(interval_mon_mean, na.rm = T),
+    mean_num_obs = mean(num_obs, na.rm = T),
+    sd_num_obs = sd(num_obs, na.rm = T),
+    Median_num_obs = median(num_obs, na.rm = T),
+    Min_num_obs = min(num_obs, na.rm = T),
+    Max_num_obs = max(num_obs, na.rm = T),
+    mean_cftr = mean(CFTR_score, na.rm = T),
+    sd_cftr = sd(CFTR_score, na.rm = T),
+    Median_cftr = median(CFTR_score, na.rm = T),
+    Min_cftr = min(CFTR_score, na.rm = T),
+    Max_cftr = max(CFTR_score, na.rm = T),
+  ) 
+
+summary_adult_cont <- t(summary_adult_cont)
+summary_adult_cont <- data.frame(rownames(summary_adult_cont), summary_adult_cont)
+colnames(summary_adult_cont) <- c("var", "value")
+
+## categorical data summary
+summary_sex <- data.frame(table(adult_nodup$sex))
+colnames(summary_sex) <- c("var", "value")
+
+summary_pi <- data.frame(table(adult_nodup$panc_function_geno_pred))
+colnames(summary_pi) <- c("var", "value")
+
+summary_platform <- data.frame(table(adult_full$platform))
+colnames(summary_platform) <- c("var", "value")
+
+summary_adult <- rbindlist(list(summary_adult_cont, summary_sex, summary_pi, summary_platform),
+                       use.names = TRUE, fill = TRUE)
+
+summ_file_path <- "~/Documents/Analysis/prelim_summary.xlsx"
+summ_wb <- loadWorkbook(summ_file_path)
+
+if ("adult_output_cont" %in% getSheetNames(summ_file_path)) {
+  removeWorksheet(summ_wb, "adult_output_cont")
+}
+
+# Add a new sheet to the existing workbook
+addWorksheet(summ_wb, sheetName = "adult_output_cont")
+
+# Write the data frame to the new sheet
+writeData(summ_wb, sheet = "adult_output_cont", summary_adult)
+
+# Save the modified workbook
+saveWorkbook(summ_wb, summ_file_path, overwrite = TRUE)
+
+```
+
+
+
+
+```{r}
+# output phenotype + PC to txt
+pheno <- adult_nodup %>%
+  select(fid, iid, bmi)
+colnames(pheno) <- c("FID", "IID", "bmi")
+
+hist(pheno$bmi, xlab = "BMI", ylim = c(0, 1200))
+
+
+covar <- adult_nodup %>%
+  select(fid, iid, age, sex, CFTR_score,panc_function_geno_pred) %>%
+  mutate(sex = case_when(sex=="M" ~ 0, sex=="F" ~ 1),
+         PIPS = case_when(panc_function_geno_pred=="PI" ~ 1,
+                          panc_function_geno_pred=="NOT_PI" ~ 0),
+         agec = age - mean(age),
+         agesq = agec^2) %>%
+  select(-c(panc_function_geno_pred))
+
+colnames(covar) <- c("FID", "IID", "age", "sex", "CFTR_score", "PIPS", "agec", "agesq")
+pheco <- merge(pheno, covar)
+write.table(pheco, file = "/Users/wendi qu/Documents/Data/phenotype_raw_bmi.txt", row.names = F, 
+            quote = FALSE)
+
+# inverse normalize bmi 
+c <- 3/8
+invPheno <- qnorm((rank(pheno[, "bmi"], na.last = "keep") - c)/(sum(!is.na(pheno[, "bmi"]))+1-2*c))
+pheno[, "bmi"] <- invPheno
+
+PC <- read.table("~/Documents/Data/PCAIR_CAN_Eigenvectors", header = FALSE)[,1:7]
+colnames(PC) <- c("IID", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6")
+
+covar_ <- merge(covar, PC)
+covar_ <- covar_[,c("FID", "IID", "age", "sex", "CFTR_score", "PIPS", "agec", "agesq", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6")]
+pheno_covar <- merge(pheno, covar_)
+
+
+# fitting linear regression model without SNP
+m0 <- lm(bmi ~ age + agesq + sex + PC1 + PC2 + PC3 + PC4 + PC5 + PC6, data = pheno_covar)
+summary(m0)
+# all except PCs are sig
+
+m1 <- lm(bmi ~ age + agesq + sex + CFTR_score + PIPS + PC1 + PC2 + PC3 + PC4 + PC5 + PC6, data = pheno_covar)
+summary(m1)
+# all except PCs and CFTR score are sig
+
+m2 <- lm(bmi ~ age + agesq + sex + CFTR_score + PC1 + PC2 + PC3 + PC4 + PC5 + PC6, data = pheno_covar)
+summary(m2)
+# all except PCs are sig
+
+m3 <- lm(bmi ~ age + agesq + sex + PIPS + PC1 + PC2 + PC3 + PC4 + PC5 + PC6, data = pheno_covar)
+summary(m3)
+# all except PCs are sig
+
+
+# export
+write.table(pheno, file = "/Users/wendi qu/Documents/Data/phenotype.txt", row.names = F, 
+            quote = FALSE)
+write.table(covar_, file = "/Users/wendi qu/Documents/Data/covariates.txt", row.names = F, 
+            quote = FALSE)
+write.table(pheno_covar, file = "/Users/wendi qu/Documents/Data/pheno_covar.txt", row.names = F, 
+            quote = FALSE)
+
+
+```
+
+
+```{r}
+# Sensitivity analysis 1
+## excluding those with missing CF severity score
+adult_nomiss <- adult_nodup %>%
+  filter(CFTR_score!=0) 
+
+pheno_nomiss <- adult_nomiss %>%
+  select(fid, iid, bmi)
+colnames(pheno_nomiss) <- c("FID", "IID", "bmi")
+
+# inverse normalize bmi 
+c <- 3/8
+invPheno <- qnorm((rank(pheno_nomiss[, "bmi"], na.last = "keep") - c)/(sum(!is.na(pheno_nomiss[, "bmi"]))+1-2*c))
+pheno_nomiss[, "bmi"] <- invPheno
+
+covar_nomiss <- covar[covar$IID %in% adult_nomiss$iid, ]
+
+PC_nomiss <- read.table("~/Documents/Data/Sensitivity/PCAIR_CAN_Eigenvectors_nomiss", header = FALSE)[,1:8]
+colnames(PC_nomiss) <- c("IID", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7")
+
+covar_nomiss_ <- merge(covar_nomiss, PC_nomiss)
+
+pheno_covar_nomiss <- merge(pheno_nomiss, covar_nomiss_)
+
+
+write.table(adult_nomiss[, c("fid", "iid")], file = "/Users/wendi qu/Documents/Data/Sensitivity/subjects_keep_nomiss.txt", row.names = F, 
+            col.names = F,quote = FALSE)
+write.table(pheno_covar_nomiss, file = "/Users/wendi qu/Documents/Data/Sensitivity/pheno_covar_nomiss.txt", row.names = F, 
+            quote = FALSE)
+
+```
+
+```{r}
+# Sensitivity analysis 2
+## change CFTR = 0 to NA
+adult_na <- adult_nodup %>%
+  mutate(CFTR_score = ifelse(CFTR_score==0, NA, CFTR_score),
+         PIPS = case_when(panc_function_geno_pred=="PI" ~ 1,
+                          panc_function_geno_pred=="NOT_PI" ~ 0),
+         sex = case_when(sex=="M" ~ 0, sex=="F" ~ 1))
+
+pheno_na <- adult_na %>%
+  select(fid, iid, bmi)
+colnames(pheno_na) <- c("FID", "IID", "bmi")
+
+# inverse normalize bmi 
+c <- 3/8
+invPheno <- qnorm((rank(pheno_na[, "bmi"], na.last = "keep") - c)/(sum(!is.na(pheno_na[, "bmi"]))+1-2*c))
+pheno_na[, "bmi"] <- invPheno
+
+covar_na <- adult_na %>%
+  select(fid, iid, age, sex, CFTR_score, PIPS)
+colnames(covar_na) <- c("FID", "IID", "age", "sex", "CFTR_score", "PIPS")
+
+covar_na_ <- merge(covar_na, PC)
+
+pheno_covar_na <- merge(pheno_na, covar_na_)
+
+
+write.table(pheno_covar_na, file = "/Users/wendi qu/Documents/Data/pheno_covar_na.txt", row.names = F, 
+            quote = FALSE)
+
+```
+
+
